@@ -2,7 +2,14 @@ import io
 from typing import Dict, Any, List, Tuple, Optional
 from PIL import Image, ImageDraw
 import numpy as np
-import piexif
+
+try:
+    import piexif
+    PIEXIF_AVAILABLE = True
+except ImportError:
+    piexif = None
+    PIEXIF_AVAILABLE = False
+
 from .document_scanner import mask_evidence
 from .sensitive_detector import PATTERNS, CATEGORY_ROLE_MAP
 
@@ -32,26 +39,43 @@ def extract_exif_metadata(image: Image.Image) -> Dict[str, Any]:
         "risk_level": "Low"
     }
 
-    try:
-        exif_dict = piexif.load(image.info.get("exif", b""))
-        gps = exif_dict.get("GPS", {})
-        if gps:
-            metadata["has_gps"] = True
-            metadata["risk_level"] = "High"
-            metadata["gps_info"] = {
-                "latitude_ref": gps.get(piexif.GPSIFD.GPSLatitudeRef, b"").decode("latin-1", errors="ignore"),
-                "longitude_ref": gps.get(piexif.GPSIFD.GPSLongitudeRef, b"").decode("latin-1", errors="ignore"),
-                "timestamp": str(gps.get(piexif.GPSIFD.GPSTimeStamp, "")),
-            }
+    if PIEXIF_AVAILABLE and piexif:
+        try:
+            exif_dict = piexif.load(image.info.get("exif", b""))
+            gps = exif_dict.get("GPS", {})
+            if gps:
+                metadata["has_gps"] = True
+                metadata["risk_level"] = "High"
+                metadata["gps_info"] = {
+                    "latitude_ref": gps.get(piexif.GPSIFD.GPSLatitudeRef, b"").decode("latin-1", errors="ignore"),
+                    "longitude_ref": gps.get(piexif.GPSIFD.GPSLongitudeRef, b"").decode("latin-1", errors="ignore"),
+                    "timestamp": str(gps.get(piexif.GPSIFD.GPSTimeStamp, "")),
+                }
 
-        zeroth = exif_dict.get("0th", {})
-        make = zeroth.get(piexif.ImageIFD.Make, b"").decode("latin-1", errors="ignore").strip()
-        model = zeroth.get(piexif.ImageIFD.Model, b"").decode("latin-1", errors="ignore").strip()
-        if make or model:
-            metadata["raw_tags"]["device"] = f"{make} {model}".strip()
+            zeroth = exif_dict.get("0th", {})
+            make = zeroth.get(piexif.ImageIFD.Make, b"").decode("latin-1", errors="ignore").strip()
+            model = zeroth.get(piexif.ImageIFD.Model, b"").decode("latin-1", errors="ignore").strip()
+            if make or model:
+                metadata["raw_tags"]["device"] = f"{make} {model}".strip()
 
-    except Exception:
-        pass
+        except Exception:
+            pass
+    else:
+        # Fallback to Pillow's built-in _getexif()
+        try:
+            exif = image._getexif() if hasattr(image, "_getexif") else None
+            if exif:
+                from PIL.ExifTags import TAGS, GPSTAGS
+                for tag_id, value in exif.items():
+                    tag = TAGS.get(tag_id, tag_id)
+                    if tag == "GPSInfo":
+                        metadata["has_gps"] = True
+                        metadata["risk_level"] = "High"
+                        metadata["gps_info"] = {GPSTAGS.get(k, k): v for k, v in value.items()} if isinstance(value, dict) else {}
+                    elif tag in ("Make", "Model"):
+                        metadata["raw_tags"]["device"] = f"{metadata['raw_tags'].get('device', '')} {value}".strip()
+        except Exception:
+            pass
 
     return metadata
 
